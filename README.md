@@ -28,9 +28,9 @@ We run our code using PyTorch 2.1 with CUDA 12. We provide a reference conda env
 
 ```
 @inproceedings{
-anonymous2024personalized,
+mclaughlin2024personalized,
 title={Personalized Federated Learning via Feature Distribution Adaptation},
-author={Anonymous},
+author={Connor Mclaughlin and Lili Su},
 booktitle={The Thirty-eighth Annual Conference on Neural Information Processing Systems},
 year={2024},
 url={https://openreview.net/forum?id=Wl2optQcng}
