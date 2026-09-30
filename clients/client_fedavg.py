@@ -7,8 +7,10 @@ class ClientFedAvg(Client):
         super().__init__(args, client_idx)        
         
     def train(self):
+        if self.use_probvlm:
+            return self.train_probvlm()
         trainloader = self.load_train_data()
-        optimizer = torch.optim.SGD(self.model.parameters(), lr=self.lr, momentum=self.momentum, weight_decay=self.wd)
+        optimizer = torch.optim.SGD([p for p in self.model.parameters() if p.requires_grad], lr=self.lr, momentum=self.momentum, weight_decay=self.wd)
         self.model = self.model.to(self.device)
         self.model.train()
         losses = AverageMeter()

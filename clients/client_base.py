@@ -5,9 +5,11 @@ from data.utils.loader import get_augmented_partition, get_partition, get_digit5
 from torch.utils.data import DataLoader, Subset
 import torch
 import os
+from models.probvlm import TempCombLoss
+from utils.util import AverageMeter
 
 class Client(ABC):
-    def __init__(self, args, client_idx):
+    def __init__(self, args, client_idx, corrupted=False):
         self.D = args.model.D
         self.model = deepcopy(args.model)
         self.model_path = f"results/{args.exp_name}/client_{client_idx}.ckpt"
@@ -26,11 +28,21 @@ class Client(ABC):
         self.last_loss = -1
         self.train_prop = args.train_prop
         self.val_prop = 1 - args.train_prop
-        self.setup_dataset(args) 
+        # ProbVLM adapter training (replaces standard local training when model_name == "probvlm")
+        self.use_probvlm = args.model_name == "probvlm"
+        if self.use_probvlm:
+            self.probvlm_loss = TempCombLoss()
+            self.probvlm_lr = args.probvlm_lr
+            self.probvlm_T1 = args.probvlm_T1
+            self.probvlm_T2 = args.probvlm_T2
+            self.probvlm_cross_lambda = args.probvlm_cross_lambda
+        self.setup_dataset(args, corrupted) 
         self.label_distribution = list(self.get_label_distribution()[1].cpu().numpy())
         
     def save_model(self):
-        torch.save(self.model.state_dict(), self.model_path)
+        # frozen CLIP models only save the trainable head
+        state = self.model.trainable_state_dict() if hasattr(self.model, "trainable_state_dict") else self.model.state_dict()
+        torch.save(state, self.model_path)
 
     def partial_dataset(self, dataset):
         """
@@ -48,16 +60,17 @@ class Client(ABC):
         val_dataset = Subset(dataset, indices=val_indices)
         return train_dataset, val_dataset
 
-    def setup_dataset(self, args):
+    def setup_dataset(self, args, corrupted=False):
+        """corrupted: force the CIFAR-C version of this client's partition (as with --augmented), regardless of client index"""
         if args.dataset == "emnist":
             self.setup_emnist_dataset(args)
         elif args.dataset == "digit5":
             self.setup_digit5_dataset(args)
         elif args.dataset == "office10":
             self.setup_office10_dataset(args)
-        elif args.augmented and self.client_idx < 50:
+        elif corrupted or (args.augmented and self.client_idx < 50):
             self.setup_augmented_dataset(args)
-            print("Loaded augmented dataset for client", self.client_idx)
+            print(f"Loaded augmented dataset for client {self.client_idx} ({self.augmentation}, severity {self.severity})")
         else:
             indices = np.load(f"data/partition/{self.partition_path}/client_{self.client_idx}.npz")
             train_dataset, test_dataset = get_partition(args, indices)
@@ -218,6 +231,64 @@ class Client(ABC):
     @abstractmethod
     def train(self):
         pass
+
+    def train_probvlm(self):
+        """
+        Local ProbVLM training: fits the probabilistic adapter on frozen CLIP features with the
+        intra-modal and cross-modal generalized Gaussian objectives. Each image is paired with the
+        text embedding of its class prompt (our datasets have no captions).
+        If the classification head is trainable (e.g. FedAvg/Local) it is fit with cross-entropy on the
+        detached adapter means, so the adapter only receives the ProbVLM loss; a frozen head (pFedFDA) is left as-is.
+        """
+        trainloader = self.load_train_data()
+        self.model = self.model.to(self.device)
+        self.model.train()
+        adapter = self.model.probvlm
+        optimizer = torch.optim.Adam(adapter.parameters(), lr=self.probvlm_lr)
+        fc_params = [p for p in self.model.fc.parameters() if p.requires_grad]
+        fc_optimizer = torch.optim.SGD(fc_params, lr=self.lr, momentum=self.momentum, weight_decay=self.wd) if fc_params else None
+
+        text_feats = self.model.text_features.to(self.device).float()
+        assert text_feats.shape[0] == self.num_classes, \
+            f"ProbVLM needs one text prompt per class ({text_feats.shape[0]} prompts, {self.num_classes} classes)"
+        T1, T2 = self.probvlm_T1, self.probvlm_T2
+
+        losses = AverageMeter()
+        accs = AverageMeter()
+        for e in range(self.local_epochs):
+            for i, (x, y) in enumerate(trainloader):
+                x = x.to(self.device)
+                y = y.to(self.device)
+
+                xfI, (img_mu, img_1alpha, img_beta) = self.model.encode_dist(x)
+                xfT = text_feats[y]
+                txt_mu, txt_1alpha, txt_beta = adapter.txt_BayesCap(xfT)
+
+                loss_i = self.probvlm_loss(img_mu, img_1alpha, img_beta, xfI, T1=T1, T2=T2)
+                loss_t = self.probvlm_loss(txt_mu, txt_1alpha, txt_beta, xfT, T1=T1, T2=T2)
+                # cross-modal terms
+                loss_i4t = self.probvlm_loss(img_mu, img_1alpha, img_beta, xfT, T1=T1, T2=T2)
+                loss_t4i = self.probvlm_loss(txt_mu, txt_1alpha, txt_beta, xfI, T1=T1, T2=T2)
+                loss = loss_i + loss_t + self.probvlm_cross_lambda * (loss_i4t + loss_t4i)
+
+                output = self.model.fc(img_mu.detach())
+                if fc_optimizer is not None:
+                    loss = loss + self.loss(output, y)
+
+                acc = (output.argmax(1) == y).float().mean() * 100.0
+                accs.update(acc.item(), x.size(0))
+                losses.update(loss.item(), x.size(0))
+
+                optimizer.zero_grad()
+                if fc_optimizer is not None:
+                    fc_optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                if fc_optimizer is not None:
+                    fc_optimizer.step()
+
+        self.model = self.model.to("cpu")
+        return accs.avg, losses.avg
 
     def evaluate(self):
         with torch.no_grad():

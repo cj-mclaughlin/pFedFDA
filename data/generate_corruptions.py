@@ -64,7 +64,7 @@ def plasma_fractal(mapsize=32, wibbledecay=3):
     'mapsize' must be a power of two.
     """
     assert (mapsize & (mapsize - 1) == 0)
-    maparray = np.empty((mapsize, mapsize), dtype=np.float_)
+    maparray = np.empty((mapsize, mapsize), dtype=np.float64)
     maparray[0, 0] = 0
     stepsize = mapsize
     wibble = 100
@@ -430,11 +430,11 @@ select 10 augmentations, each with 5 levels
 """
 if __name__ == "__main__":
     d = collections.OrderedDict()
-    d['Gaussian Noise'] = gaussian_noise
-    d['Shot Noise'] = shot_noise
-    d['Impulse Noise'] = impulse_noise
-    d['Defocus Blur'] = defocus_blur
-    d['Motion Blur'] = motion_blur
+    # d['Gaussian Noise'] = gaussian_noise
+    # d['Shot Noise'] = shot_noise
+    # d['Impulse Noise'] = impulse_noise
+    # d['Defocus Blur'] = defocus_blur
+    # d['Motion Blur'] = motion_blur
     d['Fog'] = fog
     d['Brightness'] = brightness
     d['Contrast'] = contrast
